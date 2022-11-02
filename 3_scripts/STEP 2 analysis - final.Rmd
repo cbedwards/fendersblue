@@ -1,0 +1,678 @@
+---
+title: 'FBB Pheno STEP 2: analysis'
+author: "Rachael E. Bonoan"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+```{r, warning=FALSE, message=FALSE}
+library(plyr)
+library(tidyverse)
+library(MASS)
+library(car)
+library(emmeans)
+library(multcompView)
+library(here)
+library(ggplot2)
+library(patchwork)
+
+library(broom)
+library(reshape2)
+library(ggcorrplot)
+```
+
+## Themes and color palette for graphs
+```{r}
+# color palette
+pal_9sites_mono2=c("#7570b3", 
+                    "#8d3e01", "#c05402",  "#f26a02", "#fd862a", 
+                    "#105d46", "#178867",  "#1fb487", "#2bdba6")
+
+# theme for trends over time
+pheno.theme =  theme(panel.border = element_rect(colour = NA,fill=NA),
+                       panel.background=element_blank(),
+                       panel.grid.major=element_blank(),
+                       panel.grid.minor=element_blank(),
+                       axis.line=element_line(colour="black"),
+                       axis.text.y=element_text(colour="black",size=13),
+                       axis.text.x=element_text(colour="black",size=13, angle=45, vjust=0.5),
+                       axis.ticks=element_line(colour="black"),
+                       axis.title.y=element_text(colour="black",size=14),
+                       axis.title.x=element_text(colour="black",size=14),
+                       legend.text=element_text(size=10),
+                       legend.title=element_text(size=12),
+                       aspect.ratio = 1)
+
+# theme for association between pop growth and phenology
+slope.theme =  theme(panel.border = element_rect(colour = NA,fill=NA),
+                     panel.background=element_blank(),
+                     panel.grid.major=element_blank(),
+                     panel.grid.minor=element_blank(),
+                     axis.line=element_line(colour="black"),
+                     axis.text.y=element_text(colour="black",size=13),
+                     axis.text.x=element_text(colour="black",size=13),
+                     axis.ticks=element_line(colour="black"),
+                     axis.title.y=element_text(colour="black",size=14),
+                     axis.title.x=element_text(colour="black",size=14),
+                     #legend.position = "bottom",
+                     legend.text=element_text(size=10),
+                     legend.title=element_text(size=12),
+                     aspect.ratio = 1)
+
+```
+
+# TRENDS OVER TIME (years)
+
+## Data: estimates from GLMM curves
+
+### Import
+ALL Variables (__bold__ = variables of interest for THIS analysis)
+
+* __scenario:__ name of the fitting. Site name, followed by "base" for using only the raw data, and "monthly" for the cases where we added observations of 0 counts on days 15, 46, 74, 227, 258, 288, 319, 349 of each year.
+* __year:__ year of fitting
+* b0, b1, b2: fitted coefficients, after unscaling. Corresponds to the linear model presented in the methods paper.
+* __mu:__ estimated mean day of activity
+* __fp:__ estimated 80% flight period (80FP; days from 0.1 quantile and 0.9 quantile of activity)
+* __N:__ estimated abundance index 
+* __tenperc:__ estimated "start of activity" (day of 0.1 quantile of activity)
+* h: estimated peak activity. This is not a metric we have focused on, but I have included because I had the code.
+* __ofs:__ estimated observed flight season (OFS; days between first and last estimate of N = 1)
+* badfit: Were the best-fitting estimates biologically implausible? (exponential decay or growth instead of gaussian)
+```{r, warning=FALSE, message=FALSE}
+# data downloaded from Dropbox, 4_res (file has same name)
+dat = read_csv(here::here("4_res","yearly-summary-full.csv"))
+head(dat)
+```
+
+### Process
+Two variables processed before analysis:
+
+__scenario:__ divided into three variables
+
+* cons.area: conservation area (Fir = Fir Butte, WC = Willow Creek, FR = Fern Ridge)
+* name: name of site (9 sites), filtered to remove Hayfield 
+* scenario: see above, filtered for only the base scenario
+
+__N:__ two mutations to calculate __Nln__
+
+1. N, N.025, N.975 all divided by 10 (FBB lifespan) to convert "activity days" to butterfly population estimate
+
+2. AFTER dividing by 10, all "Ns" natural-logged
+
+_Data also reorderd for consistency with graph legends and comparions._
+
+```{r, warning=FALSE, message=FALSE}
+dat2 = dat %>% 
+  filter(site != "Hayfield") %>%
+  mutate(bfly = N / 10) %>%
+  mutate(Nln = log(bfly)) # HAVE TO DIVDE BY 10 FIRST!
+
+
+head(dat2)
+#summary(dat2)
+dat2$name = gsub(".*_", "", dat2$site)
+dat2$cons.area = gsub("_.*", "", dat2$site)
+# reorder for consistency (alphabetical, by conservation area)
+dat2$name = factor(dat2$name, levels = c ("Butte","Eaton", "GreenOaks", "Shore", "Spires","Bailey", "FirGrove", "Main", "North"))
+```
+
+## Data analysis 
+
+### Population size (Nln) over time (years)
+Fixed effects: year, name, interaction
+```{r}
+mpop = lm(Nln ~ as.numeric(year) * name, data=dat2)
+hist(resid(mpop)) # check residuals for model
+```
+
+#### Anova()
+gives signficance values for fixed effects
+```{r}
+Anova(mpop) 
+```
+
+#### summary()
+gives adjusted R-square for full linear regression
+```{r}
+ summary(mpop)
+```
+
+#### emmeans() and CLD()
+
+Compare all sites, no correction for multiple comparisons, interaction effect
+```{r, message=FALSE, warning=FALSE}
+# significant interaction, report for graph
+em.mpop = emtrends(mpop, pairwise ~ name, var = "year", adjust = "none")
+#em.mpop
+
+# assign letters for sig groups
+## Note: CLD is now deprecated. 
+# CLD(em.mpop, details = TRUE, sort = FALSE, alpha = 0.05, Letters = c("a", "b", "c", "d", "e", "f"), adjust = "none")
+
+```
+
+Compare all sites, Tukey's correction for multiple comparisons, interaction effect (slopes)
+```{r, message=FALSE, warning=FALSE}
+# significant interaction, report for graph
+tuk.mpop = emtrends(mpop, pairwise ~ name, var = "year", adjust = "Tukey")
+#tuk.mpop
+
+# assign letters for sig groups
+## Note: CLD is now deprecated. 
+# CLD(tuk.mpop, details = TRUE, sort = FALSE, alpha = 0.05, Letters = c("a", "b", "c", "d", "e", "f"), adjust = "Tukey")
+```
+
+#### Graph (Figure 3, panel a)
+```{r, message=FALSE}
+pop=ggplot(dat2, aes(x=year, y=Nln, shape = cons.area, color = name))+
+    geom_point(size=2, alpha = 0.4)+
+    geom_smooth(method=lm,se=FALSE,size=0.7)+
+    #geom_linerange(aes(ymin = N.025ln, ymax = N.975ln)) + 
+    #stat_smooth(method=lm,se=TRUE,color="black",linetype="dashed")+
+    stat_ellipse(aes(x = year, y = Nln, group = NA), type = "norm", color="black", linetype="dashed", size=1)+
+    #facet_grid(~cons.area)+
+    xlab("Year")+
+    ylab("ln(Estimated population size)")+
+    labs(color="Site")+
+    ylim(0, 10) +
+    pheno.theme+
+    scale_x_continuous(breaks=c(1990, 1995, 2000, 2005, 2010, 2015, 2020))+
+    scale_shape_manual(name = "Conservation area",
+                       values=c(15, 16, 17),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    scale_color_manual(values=pal_9sites_mono2,
+                       labels=c("Fir Butte", "Eaton, FR", "Green Oaks, FR", "Shore, FR",
+                                "Spires, FR", "Bailey, WC", "Fir Grove, WC", "Main, WC", "North, WC"))+
+    annotate("text", x = 2016, y = 2, label = "r = 0.70")
+pop
+```
+
+### Day of peak flight (DOY) over time (years)
+Fixed effects: year, name, interaction
+```{r}
+mmu = lm(mu ~ year * name, data=dat2)
+hist(resid(mmu)) # check residuals for model
+```
+
+#### Anova()
+gives signficance values for fixed effects
+```{r}
+Anova(mmu) 
+```
+
+#### summary()
+gives adjusted R-square for full linear regression
+```{r}
+ summary(mmu)
+```
+
+#### mean change per year
+```{r}
+emtrends(mmu, "year", var = "year")
+```
+
+#### emmeans() and CLD()
+compare all sites, no correction for multiple comparisons
+```{r, message=FALSE, warning=FALSE}
+# no significant interaction, use emmeans()
+em.mmu = emmeans(mmu, specs = pairwise ~ name, adjust = "none")
+em.mmu
+#em.mmu
+
+# assign letters for sig groups
+## Note: CLD is now deprecated. 
+# CLD(em.mmu, details = TRUE, sort = FALSE, alpha = 0.05, Letters = c("a", "b", "c", "d", "e", "f"), adjust = "none")
+```
+
+Compare all sites, Tukey's correction for multiple comparisons, site effect (means)
+_Will not look at multiple comparisons for slopes because no significant interaction effect_
+```{r, message=FALSE, warning=FALSE}
+tuk.mmu = emmeans(mmu, specs = pairwise ~ name, adjust = "Tukey")
+#tuk.mmu
+
+# assign letters for sig groups
+## Note: CLD is now deprecated. 
+# CLD(tuk.mmu, details = TRUE, sort = FALSE, alpha = 0.05, Letters = c("a", "b", "c", "d", "e", "f"), adjust = "Tukey")
+```
+
+#### Graph (Figure 3, panel b)
+```{r, message=FALSE}
+peak=ggplot(dat2, aes(x=year, y=mu, shape = cons.area, color = name))+
+    geom_point(size=2,alpha=0.4)+
+    geom_smooth(method=lm,se=FALSE,size=0.7)+
+    #stat_smooth(method=lm,se=TRUE,color="black",linetype="dashed")+
+    stat_ellipse(aes(x = year, y = mu, group = NA), type = "norm", color="black", linetype="dashed", size=1)+
+    #facet_grid(~cons.area)+
+    xlab("Year")+
+    ylab("Day of peak flight (DOY)")+
+    labs(color="Site")+
+    pheno.theme+
+    scale_x_continuous(breaks=c(1990, 1995, 2000, 2005, 2010, 2015, 2020))+
+    scale_shape_manual(name = "Conservation area",
+                       values=c(15, 16, 17),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    scale_color_manual(values=pal_9sites_mono2,
+                       labels=c("Fir Butte", "Eaton, FR", "Green Oaks, FR", "Shore, FR",
+                                "Spires, FR", "Bailey, WC", "Fir Grove, WC", "Main, WC", "North, WC"))+
+    annotate("text", x = 2020, y = 123, label = "r = 0.27")
+  
+peak
+```
+
+### 80% flight period (80FP) over time (years)
+Fixed effects: year, name, interaction
+```{r}
+mfp = lm(fp ~ year * name, data=dat2)
+hist(resid(mfp)) # check residuals for model
+```
+
+#### Anova()
+gives signficance values for fixed effects
+```{r}
+Anova(mfp) 
+```
+
+#### summary()
+gives adjusted R-square for full linear regression
+```{r}
+ summary(mfp)
+```
+
+#### emmeans() and CLD()
+compare all sites, no correction for multiple comparisons
+```{r, message=FALSE, warning=FALSE}
+# no significant interaction, use emmeans()
+em.mfp = emmeans(mfp, pairwise ~ name, adjust = "none")
+#em.mfp
+
+# assign letters for sig groups
+## Note: CLD is now deprecated. 
+# CLD(em.mfp, details = TRUE, sort = FALSE, alpha = 0.05, Letters = c("a", "b", "c", "d", "e", "f"), adjust = "none")
+```
+
+Compare all sites, Tukey's correction for multiple comparisons
+```{r, message=FALSE, warning=FALSE}
+# no significant interaction, use emmeans()
+tuk.mfp = emmeans(mfp, pairwise ~ name, adjust = "Tukey")
+#tuk.mfp
+
+# assign letters for sig groups
+## Note: CLD is now deprecated. 
+# CLD(tuk.mfp, details = TRUE, sort = FALSE, alpha = 0.05, Letters = c("a", "b", "c", "d", "e", "f"), adjust = "Tukey")
+```
+
+#### Graph (Figure 3, panel c)
+```{r}
+period=ggplot(dat2, aes(x=year, y=fp, shape = cons.area, color = name))+
+    geom_point(size=2,alpha=0.4)+
+    geom_smooth(method=lm,se=FALSE,size=0.7)+
+    #stat_smooth(method=lm,se=TRUE,color="black",linetype="dashed")+
+    stat_ellipse(aes(x = year, y = fp, group = NA), type = "norm", color="gray", linetype="dashed", size=1)+
+    #facet_grid(~cons.area)+
+    xlab("Year")+
+    ylab("Length of 80FP (days)")+
+    labs(color="Site")+
+    pheno.theme+
+    scale_x_continuous(breaks=c(1990, 1995, 2000, 2005, 2010, 2015, 2020))+
+    scale_shape_manual(name = "Conservation area",
+                       values=c(15, 16, 17),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    scale_color_manual(values=pal_9sites_mono2,
+                       labels=c("Fir Butte", "Eaton, FR", "Green Oaks, FR", "Shore, FR",
+                                "Spires, FR", "Bailey, WC", "Fir Grove, WC", "Main, WC", "North, WC"))+
+  annotate("text", x = 2017, y = 9.5, label = "r = 0.07")
+
+period
+```
+
+### Observed flight season (OFS) over time (years)
+Fixed effects: year, name, interaction
+```{r}
+mofs = lm(ofs ~ year * name, data=dat2)
+hist(resid(mofs)) # check residuals for model
+```
+
+#### Anova()
+gives signficance values for fixed effects
+```{r}
+Anova(mofs) 
+```
+
+#### summary()
+gives adjusted R-square for full linear regression
+```{r}
+ summary(mofs)
+```
+
+#### emmeans() and CLD()
+compare all sites, no correction for multiple comparisons
+```{r, message=FALSE, warning=FALSE}
+# significant interaction, use emtrends()
+em.mofs = emtrends(mofs, pairwise ~ name, var = "year", adjust = "none")
+#em.ofs
+
+# assign letters for sig groups
+## Note: CLD is now deprecated. 
+# CLD(em.mofs, details = TRUE, sort = FALSE, alpha = 0.05, Letters = c("a", "b", "c", "d", "e", "f"), adjust = "none")
+```
+
+Compare all sites, Tukey's correction for multiple comparisons of interaction effect (slope)
+```{r, message=FALSE, warning=FALSE}
+# significant interaction, use emtrends()
+tuk.mofs = emtrends(mofs, pairwise ~ name, var = "year", adjust = "Tukey")
+tuk.mofs
+
+# assign letters for sig groups
+## Note: CLD is now deprecated. 
+# CLD(tuk.mofs, details = TRUE, sort = FALSE, alpha = 0.05, Letters = c("a", "b", "c", "d", "e", "f"), adjust = "Tukey")
+```
+
+Compare all sites, Tukey's correction for multiple comparisons of site effect (means)
+```{r, message=FALSE, warning=FALSE}
+# significant interaction, use emtrends()
+tuk.mofs.mean = emmeans(mofs, pairwise ~ name, adjust = "Tukey")
+#tuk.mofs.mean
+
+# assign letters for sig groups
+## Note: CLD is now deprecated. 
+# CLD(tuk.mofs.mean, details = TRUE, sort = FALSE, alpha = 0.05, Letters = c("a", "b", "c", "d", "e", "f"), adjust = "Tukey")
+```
+
+#### Graph (Figure 3, panel d)
+```{r, warning=FALSE}
+season=ggplot(dat2, aes(x=year, y=ofs, shape = cons.area, color = name))+
+    geom_point(size=2,alpha=0.4)+
+    geom_smooth(method=lm,se=FALSE,size=0.7)+
+    #stat_smooth(method=lm,se=TRUE,color="black",linetype="dashed")+
+    stat_ellipse(aes(x = year, y = ofs, group = NA), type = "norm", color="black", linetype="dashed", size=1)+
+    #facet_grid(~cons.area)+
+    xlab("Year")+
+    ylab("Length of OFS (days)")+
+    labs(color="Site")+
+    pheno.theme+
+    scale_x_continuous(breaks=c(1990, 1995, 2000, 2005, 2010, 2015, 2020))+
+    scale_shape_manual(name = "Conservation area",
+                       values=c(15, 16, 17),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    scale_color_manual(values=pal_9sites_mono2,
+                       labels=c("Fir Butte", "Eaton, FR", "Green Oaks, FR", "Shore, FR",
+                                "Spires, FR", "Bailey, WC", "Fir Grove, WC", "Main, WC", "North, WC"))+
+    annotate("text", x = 2016, y = 17.5, label = "r = 0.43")
+
+season
+```
+
+### Put graphs together for FIGURE 3
+A bit hard to see all panels in the knitted document, refer to graphs above. Letters denoting significance added in Adobe Illustrator. "r" aslo changed to "R^2" in Illustrator.
+```{r, eval=FALSE}
+(pop + peak + period + season) +
+    plot_layout(guides="collect", ncol = 2) +
+    plot_annotation(tag_levels = 'A') &
+    theme(plot.tag = element_text(size = 14))
+```
+
+# ASSOCIATION BETWEEN PHENO AND POP GROWTH
+
+## Data: slopes of estimates over time (years)
+
+### Import
+ALL Variables (__bold__ = variables of interest for THIS analysis)
+
+* __scenario:__ name of the fitting. Site name, followed by "base" for all cases (code is designed to be flexible enough for multiple analyses approaches).
+
+* __vals.mu:__ day of mean activity for this site, averaged across all years
+
+* __vals.fp:__ activity period (days between 0.1 and 0.9 quantile of activity), averaged across all years
+
+* __vals.N:__: abundance index average across all years
+
+* __slope.mu, slope.mu.025, slope.mu.975:__ change in day of activity through time (linear regression of mu vs year)
+
+* __slope.fp5:__ change in 80FP through time (linear regression of fp vs year)
+
+* __slope.ofs:__ change in OFS through time (linear regression of ofs vs year)
+
+* __slope.logN:__ change in log abundance index through time (linear regression of log(N) vs time).
+
+
+```{r, warning=FALSE, message=FALSE}
+# data downloaded from Dropbox, 4_res (file has same name)
+dat.cor = read_csv(here::here("4_res","sitely-summary-full.csv"))
+head(dat.cor)
+```
+
+### Process
+On variable processed before analysis.
+
+__scenario:__ divided into two variables
+
+* cons.area: conservation area (Fir = Fir Butte, WC = Willow Creek, FR = Fern Ridge)
+* name: name of site (9 sites)
+
+_Data also reorderd for consistency with graph legends and comparions._
+```{r, warning=FALSE, message=FALSE}
+dat.cor2 = dat.cor %>% 
+  separate(scenario, c("cons.area", "name"))
+head(dat.cor2)
+#summary(dat.cor2)
+
+dat.cor2$name = factor(dat.cor2$name, levels = c ("Butte", 
+                                          "Eaton", "GreenOaks", "Shore", "Spires",
+                                          "Bailey", "FirGrove", "Main", "North"))
+
+```
+
+## Correlation plots
+Quick look to see general relationships, will run linear models (below) for relationships we're interested in interpretting. 
+```{r, eval=FALSE}
+dat.cor2.test = dat.cor2 %>%
+  dplyr::select(vals.mu, vals.fp, vals.N, vals.ofs,
+         slope.mu, slope.fp, slope.logN, slope.ofs)
+
+dat.cor2.test = dat.cor2 %>%
+  dplyr::select(-cons.area, -name)
+
+
+panel.hist <- function(x, ...){
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE, breaks=20)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col = "cyan", ...)
+}
+panel.cor <- function(x, y,
+                      digits = 2,
+                      prefix = "",
+                      cex.cor,
+                      ...){
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- abs(cor(x, y, use="complete.obs"))
+  rsigned=cor(x, y, use="complete.obs")
+  p = cor.test(x, y, use="complate.obs")$p.value
+  txt <- format(c(rsigned, 0.123456789), digits = digits)[1]
+  txt <- paste0(prefix, txt)
+  if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+  col="grey"
+  if(p<.1){col="black"}
+  if(p<.05){col="blue"}
+  text(0.5, 0.5, txt, cex = cex.cor *(r+.2)/(r+1), col=col)
+}
+panel.cortest = function(x,y,
+                         digits=2,
+                         prefix="",
+                         cex.cor,
+                         ...){
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  p <- signif(cor.test(x, y, use="complete.obs")$p.value,2)
+  if(missing(cex.cor)) cex.cor <- 2
+  col="grey"
+  if(p<.1){col="black"}
+  if(p<.05){col="red"}
+  text(.5, .5, p, cex=cex.cor, col=col)
+}
+
+pairs(dat.cor2.test,
+      lower.panel=panel.cor,
+      diag.panel=panel.hist)
+```
+
+## Change in Nln vs. change in mu
+Fixed effects: change in peak DOY (mu)
+```{r}
+mchange.mu = lm(slope.logN ~ slope.mu, data=dat.cor2)
+hist(resid(mchange.mu)) # check residuals for model
+```
+
+#### Anova()
+gives signficance values for fixed effects
+```{r}
+Anova(mchange.mu) 
+```
+
+#### summary()
+gives adjusted R-square for full linear regression
+```{r}
+summary(mchange.mu)
+```
+
+#### Graph (Figure 4, panel a)
+```{r, warning=FALSE}
+change.mu=ggplot(dat.cor2, aes(x=slope.mu, y=slope.logN, color = cons.area, shape = cons.area))+
+    geom_point(size = 3.5)+
+    #geom_errorbarh(aes(xmin = slope.mu.025, xmax = slope.mu.975), height = 0, size = 0.5)+
+    #geom_linerange(aes(ymin = slope.logN.025, ymax = slope.logN.975), width = 0, size = 0.5)+
+    #stat_smooth(method=lm,se=TRUE,color="black",linetype="dashed") + 
+    stat_ellipse(aes(x = slope.mu, y = slope.logN, group = NA), type = "norm", color="gray", linetype="dashed", size=1)+
+    #facet_wrap(~cons.area)+
+    xlab("Change in day of peak flight")+
+    ylab("Population growth rate")+
+    ylim(-0.25, 0.5)+
+    xlim(-0.8, 0)+
+    slope.theme+
+    #geom_text_repel(aes(color=factor(cons.area), label=name))+
+    scale_color_manual(name = "Conservation area",
+                       values=c("#7570b3", "#d95f02", "#1b9e77"),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    scale_shape_manual(name = "Conservation area",
+                       values=c(15, 16, 17),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    annotate("text", x = -0.05, y = 0.4, label = "r = 0.001")+
+    annotate("rect", xmin = -0.8, xmax = 0, ymin = -0.25, ymax = 0, alpha = 0.1) 
+    # + geom_text_repel(aes(label=name), color = "black")
+change.mu
+```
+
+## Change in Nln vs. change in 80FP
+Fixed effects: change in 80% flight period (80FP)
+```{r}
+mchange.fp = lm(slope.logN ~ slope.fp, data=dat.cor2)
+hist(resid(mchange.fp)) # check residuals for model
+```
+
+#### Anova()
+gives signficance values for fixed effects
+```{r}
+Anova(mchange.fp) 
+```
+
+#### summary()
+gives adjusted R-square for full linear regression
+```{r}
+summary(mchange.fp)
+```
+
+#### Graph (Figure 4, panel b)
+```{r, warning=FALSE}
+change.fp=ggplot(dat.cor2, aes(x=slope.fp, y=slope.logN, color=cons.area, shape = cons.area))+
+    geom_point(size=3.5)+
+    #geom_errorbarh(aes(xmin = slope.fp.025, xmax = slope.fp.975), height = 0, size = 0.5) +
+    #geom_errorbar(aes(ymin = slope.logN.025, ymax = slope.logN.975), width = 0, size = 0.5)+
+    #stat_smooth(method=lm,se=TRUE,color="black",linetype="dashed") + 
+    stat_ellipse(aes(x = slope.fp, y = slope.logN, group = NA), type = "norm", color="gray", linetype="dashed", size=1)+
+    #facet_wrap(~cons.area)+
+    xlab("Change in length 80FP")+
+    ylab("Population growth rate")+
+    labs(color="Conservation Area")+
+    ylim(-0.25, 0.5)+
+    xlim(-0.2,0.3)+
+    slope.theme+
+    #geom_text_repel(aes(color=factor(cons.area), label=name))+
+    scale_color_manual(name = "Conservation area",
+                       values=c("#7570b3", "#d95f02", "#1b9e77"),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    scale_shape_manual(name = "Conservation area",
+                       values=c(15, 16, 17),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    annotate("text", x = 0.25, y = 0.4, label = "r = 0.05")+
+    annotate("rect", xmin =-0.2, xmax = 0.3, ymin = -0.25, ymax = 0, alpha = 0.1)
+    # + geom_text_repel(aes(label=name), color = "black") 
+change.fp
+```
+
+## Change in Nln vs. change in OFS
+Fixed effects: change in observed flight season (OFS)
+```{r}
+mchange.ofs = lm(slope.logN ~ slope.ofs, data=dat.cor2)
+hist(resid(mchange.ofs)) # check residuals for model
+```
+
+#### Anova()
+gives signficance values for fixed effects
+```{r}
+Anova(mchange.ofs) 
+```
+
+#### summary()
+gives adjusted R-square for full linear regression
+```{r}
+summary(mchange.ofs)
+```
+
+#### Graph (Figure 4, panel c)
+```{r, warning=FALSE}
+change.ofs=ggplot(dat.cor2, aes(x=slope.ofs, y=slope.logN, color=cons.area, shape = cons.area))+
+    geom_point(size=3.5)+
+    #geom_errorbarh(aes(xmin = slope.ofs.025, xmax = slope.ofs.975), height = 0, size = 0.5) +
+    #geom_errorbar(aes(ymin = slope.logN.025, ymax = slope.logN.975), width = 0, size = 0.5)+
+    #stat_smooth(method=lm,se=TRUE,color="black",linetype="dashed") + 
+    stat_ellipse(aes(x = slope.ofs, y = slope.logN, group = NA), type = "norm", color="black", linetype="dashed", size=1)+
+    #facet_wrap(~cons.area)+
+    xlab("Change in length OFS")+
+    ylab("Population growth rate")+
+    labs(color="Conservation Area")+
+    ylim(-0.25, 0.5)+
+    xlim(-1.25, 2.25)+
+    slope.theme+
+    #geom_text_repel(aes(color=factor(cons.area), label=name))+
+    scale_color_manual(name = "Conservation area",
+                       values=c("#7570b3", "#d95f02", "#1b9e77"),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    scale_shape_manual(name = "Conservation area",
+                       values=c(15, 16, 17),
+                       labels = c("Fir Butte", "Fern Ridge (FR)", "Willow Creek (WC)"))+
+    annotate("text", x = 0.5, y = 0.4, label = "r = 0.91")+
+    annotate("rect", xmin =-1.25, xmax = 2.25, ymin = -0.25, ymax = 0, alpha = 0.1)
+  # + geom_text_repel(aes(label=name), color = "black")
+change.ofs
+```
+
+### Put graphs together for FIGURE 4
+A bit hard to see all panels in the knitted document, refer to graphs above. "r" aslo changed to "R^2" in Illustrator.
+```{r, eval=FALSE}
+(change.mu + change.fp + change.ofs) + guide_area() +
+    plot_layout(guides="collect", ncol = 2) +
+    plot_annotation(tag_levels = 'A') &
+    theme(plot.tag = element_text(size = 14))
+```
